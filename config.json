@@ -1,37 +1,34 @@
 {
   "market": "cross-border-retail",
-  "comment": "跨境零售出海净利润核价（财务合规模型）。引擎通用，换系数可核其他品类。",
+  "comment": "跨境电商出海净利润核价（财务合规模型）。引擎与品类无关：所有品类参数在 profiles 里，加一个 profile 即可核新品类。",
   "fx_usd_to_cny": 6.8,
-  "logistics": {
-    "vol_divisor": 5000,
-    "freight_rate_cny_per_kg": 70,
-    "redundancy": 1.1,
-    "min_ship_weight_kg": 2.5,
-    "comment": "体积重(kg)=L×W×H/5000；运费单价¥/kg；冗余1.1；起送门槛2.5kg"
-  },
-  "plushie_coeff": { "plushie": 1.2, "normal": 1.0 },
   "fees": {
     "payment_rate": 0.03,
     "shrinkage_rate": 0.02,
-    "comment": "行业标准锁死：支付手续费3%(Stripe/PayPal实际费率)、货损拨备2%(零售业拨备标准)。海报透明展示，可在config调"
+    "comment": "行业标准锁死：平台抽成/支付3%(Stripe/PayPal实际费率)、退款拨备2%(零售业拨备标准)。海报透明展示，可调。"
   },
   "thresholds": {
     "green_net_margin": 0.20,
     "red_net_margin": 0.10,
-    "comment": "净利润率≥20%绿 / ≤10%红 / 中间黄"
+    "comment": "净利润率≥20%绿 / <10%红 / 中间黄"
   },
-  "competitor_sites": ["kikagoods.com", "ttmart.com", "whoopea.com", "tesolife.com", "faire.com", "amazon.com", "ebisuwillowbrookmall.com"],
-  "baselines": [
-    {
-      "match": ["skullpanda", "密林古堡"],
-      "name": "Skullpanda 密林古堡",
-      "cost_cny": 59,
-      "size_cm": [12, 10, 8],
-      "size_type": "carton",
-      "pcs_set": 12,
-      "plushie": false,
-      "ref_price_usd": 24.99,
-      "comment": "占位标杆，待真实数据替换"
+  "default_category": "潮玩盲盒",
+  "profiles": {
+    "潮玩盲盒": {
+      "aliases": ["潮玩", "盲盒", "手办", "blind box", "figure", "art toy", "popmart", "泡泡玛特"],
+      "vision_hint": "潮玩/盲盒/手办",
+      "competitor_sites": ["kikagoods.com", "ttmart.com", "whoopea.com", "tesolife.com", "faire.com"],
+      "price_sane_usd": [5, 60],
+      "logistics": { "vol_divisor": 5000, "freight_rate_cny_per_kg": 70, "redundancy": 1.1, "min_ship_weight_kg": 2.5 },
+      "unit_coeff": { "special": 1.2, "normal": 1.0, "special_label": "毛绒" }
+    },
+    "3C数码配件": {
+      "aliases": ["3c", "数码", "配件", "耳机", "充电", "earphone", "charger", "cable", "gadget", "accessory"],
+      "vision_hint": "3C数码/电子配件",
+      "competitor_sites": ["amazon.com", "aliexpress.com", "temu.com", "walmart.com"],
+      "price_sane_usd": [3, 120],
+      "logistics": { "vol_divisor": 5000, "freight_rate_cny_per_kg": 65, "redundancy": 1.1, "min_ship_weight_kg": 2.5 },
+      "unit_coeff": { "special": 1.0, "normal": 1.0, "special_label": "" }
     }
-  ]
+  }
 }

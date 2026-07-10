@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>跨境核价 · {{NAME}}</title>
+<title>跨境核价 · {{NAME}} · {{CATEGORY}}</title>
 <style>
   :root { --green:#1aa260; --yellow:#e0a800; --red:#d64545; --ink:#1d2129; --sub:#86909c; --bg:#f4f5f7; --card:#fff; --line:#eef0f3; }
   * { box-sizing:border-box; }
@@ -45,7 +45,10 @@
 <div class="wrap">
   <div class="head">
     <h1>跨境核价决策单 · {{NAME}}</h1>
-    <span class="src">海外均价来源：{{PRICE_SRC}}</span>
+    <span class="src">品类 {{CATEGORY}} · 公允价来源：{{PRICE_SRC}}</span>
+  </div>
+  <div style="font-size:12px; margin:-6px 0 14px; padding:8px 12px; background:#eef7f0; border-radius:8px; letter-spacing:.3px">
+    财务校验：{{VALIDATION_BADGE}}
   </div>
   <div class="bento">
     <!-- 左：大红绿灯 hero（财务合规结论） -->
@@ -72,16 +75,17 @@
       </div>
 
       <div class="card span2">
-        <div class="k">单件要素成本拆解（净利润 = 海外均价 − ① − ② − ③ − ④）</div>
+        <div class="k">单件要素成本拆解（净利润 = 海外公允价 − ① − ② − ③ − ④）</div>
         <table>
           <tr><th>项目</th><th class="amt">金额 (USD)</th></tr>
-          <tr><td>海外均价</td><td class="amt">${{RETAIL}}</td></tr>
+          <tr><td>海外公允价</td><td class="amt">${{RETAIL}}</td></tr>
           <tr><td>① 进价（¥{{COST_CNY}} ÷ {{FX}}）</td><td class="amt">−${{COST_USD}}</td></tr>
           <tr><td>② 综合物流费（体积重 + 起送门槛）</td><td class="amt">−${{LOGISTICS}}</td></tr>
-          <tr><td>③ 支付手续费 {{PAYMENT_RATE}}%（行业标准·锁死）</td><td class="amt">−${{PAYMENT}}</td></tr>
-          <tr><td>④ 货损拨备 {{SHRINKAGE_RATE}}%（行业标准·锁死）</td><td class="amt">−${{SHRINKAGE}}</td></tr>
+          <tr><td>③ 平台抽成 {{PAYMENT_RATE}}%（行业标准·锁死）</td><td class="amt">−${{PAYMENT}}</td></tr>
+          <tr><td>④ 退款拨备 {{SHRINKAGE_RATE}}%（行业标准·锁死）</td><td class="amt">−${{SHRINKAGE}}</td></tr>
           <tr class="tot"><td>单件净利润</td><td class="amt">${{NET_PROFIT}}</td></tr>
         </table>
+        <div style="font-size:12px; color:var(--sub); margin-top:8px">盈亏平衡价 ${{BREAKEVEN}} · 公允价高于此值才盈利</div>
       </div>
 
       <div class="card span2 warn">
@@ -95,13 +99,14 @@
   </div>
 
   <div class="meta">
-    <span>外箱：<b>{{SIZE}}cm</b></span>
-    <span>PCS体积重：<b>{{PCS_VOL}}kg</b></span>
-    <span>端盒体积重：<b>{{CARTON_VOL}}kg</b></span>
-    <span>端盒PCS：<b>{{PCS_SET}}</b></span>
+    <span>尺寸：<b>{{SIZE}}cm</b></span>
+    <span>单件体积重：<b>{{PCS_VOL}}kg</b></span>
+    <span>整箱体积重：<b>{{CARTON_VOL}}kg</b></span>
+    <span>整箱件数：<b>{{PCS_SET}}</b></span>
+    <span>物流形态：<b>{{SPECIAL_LABEL}}</b></span>
     <span>IP：<b>{{IP}}</b></span>
   </div>
-  <div class="foot">跨境核价决策官 · 净利润财务合规模型 · 阿里云百炼 bl + Qwen · 费率行业标准锁死，可在 config.json 调整</div>
+  <div class="foot">跨境核价决策官 · 净利润财务合规模型（品类档案 {{CATEGORY}}）· 阿里云百炼 bl + Qwen · 费率行业标准锁死，可在 config.json 调整</div>
 </div>
 </body>
 </html>
