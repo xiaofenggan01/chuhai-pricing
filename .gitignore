@@ -1,0 +1,16 @@
+# 生成产物（可由 run.mjs 重新生成）
+out/
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+*.log
+npm-debug.log*
+
+# 本地环境 / 临时 / 敏感
+.env
+.env.local
+*.local
+lark_auth_qr.png

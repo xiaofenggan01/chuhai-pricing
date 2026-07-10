@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>跨境核价 · {{NAME}}</title>
+<style>
+  :root { --green:#1aa260; --yellow:#e0a800; --red:#d64545; --ink:#1d2129; --sub:#86909c; --bg:#f4f5f7; --card:#fff; --line:#eef0f3; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); }
+  .wrap { max-width:880px; margin:0 auto; padding:28px; }
+  .head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:16px; gap:12px; }
+  .head h1 { font-size:19px; margin:0; font-weight:700; }
+  .src { font-size:12px; color:var(--sub); }
+  /* Bento Box */
+  .bento { display:grid; grid-template-columns: 300px 1fr; gap:14px; }
+  .hero { border-radius:18px; padding:26px 22px; color:#fff; display:flex; flex-direction:column; justify-content:space-between; min-height:360px; }
+  .hero.green { background:linear-gradient(160deg,#1aa260,#0e7a47); }
+  .hero.yellow { background:linear-gradient(160deg,#e0a800,#b38600); }
+  .hero.red { background:linear-gradient(160deg,#d64545,#a32f2f); }
+  .hero .lamp { font-size:14px; font-weight:700; opacity:.95; letter-spacing:.5px; }
+  .hero .big { font-size:60px; font-weight:800; line-height:1; margin:10px 0 2px; }
+  .hero .big-sub { font-size:13px; opacity:.92; }
+  .hero .verdict { font-size:13px; opacity:.96; line-height:1.5; border-top:1px solid rgba(255,255,255,.25); padding-top:12px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; align-content:start; }
+  .card { background:var(--card); border-radius:16px; padding:18px 20px; }
+  .card .k { font-size:12px; color:var(--sub); margin-bottom:6px; }
+  .card .v { font-size:28px; font-weight:800; line-height:1; }
+  .card .vsub { font-size:12px; color:var(--sub); margin-top:5px; }
+  .card.span2 { grid-column: span 2; }
+  table { width:100%; border-collapse:collapse; margin-top:6px; font-size:13px; }
+  td,th { padding:8px 4px; text-align:left; border-bottom:1px solid var(--line); }
+  th { color:var(--sub); font-weight:500; }
+  .amt { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.tot td { font-weight:700; border-top:2px solid var(--ink); border-bottom:none; }
+  .warn { background:#fff8e6; }
+  .warn .k { color:#9a6a00; }
+  .warn .body { font-size:13.5px; line-height:1.65; margin-top:4px; color:#5c4a1a; }
+  .warn b { color:#9a6a00; }
+  .meta { margin-top:14px; display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:var(--sub); }
+  .meta b { color:var(--ink); }
+  .foot { font-size:11px; color:#a0a4ab; text-align:center; margin-top:16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>跨境核价决策单 · {{NAME}}</h1>
+    <span class="src">海外均价来源：{{PRICE_SRC}}</span>
+  </div>
+  <div class="bento">
+    <!-- 左：大红绿灯 hero（财务合规结论） -->
+    <div class="hero {{LIGHT_KEY}}">
+      <div>
+        <div class="lamp">{{LIGHT_LABEL}}</div>
+        <div class="big">{{NET_MARGIN}}%</div>
+        <div class="big-sub">净利润率 · 单件净利 ${{NET_PROFIT}}</div>
+      </div>
+      <div class="verdict">{{VERDICT}}</div>
+    </div>
+
+    <!-- 右：数据网格 -->
+    <div class="grid">
+      <div class="card">
+        <div class="k">海外均价（USD）</div>
+        <div class="v">${{RETAIL}}</div>
+        <div class="vsub">毛利率 {{GROSS_MARGIN}}%</div>
+      </div>
+      <div class="card">
+        <div class="k">单件综合成本</div>
+        <div class="v">${{TOTAL_COST}}</div>
+        <div class="vsub">进价+物流+支付+货损</div>
+      </div>
+
+      <div class="card span2">
+        <div class="k">单件要素成本拆解（净利润 = 海外均价 − ① − ② − ③ − ④）</div>
+        <table>
+          <tr><th>项目</th><th class="amt">金额 (USD)</th></tr>
+          <tr><td>海外均价</td><td class="amt">${{RETAIL}}</td></tr>
+          <tr><td>① 进价（¥{{COST_CNY}} ÷ {{FX}}）</td><td class="amt">−${{COST_USD}}</td></tr>
+          <tr><td>② 综合物流费（体积重 + 起送门槛）</td><td class="amt">−${{LOGISTICS}}</td></tr>
+          <tr><td>③ 支付手续费 {{PAYMENT_RATE}}%（行业标准·锁死）</td><td class="amt">−${{PAYMENT}}</td></tr>
+          <tr><td>④ 货损拨备 {{SHRINKAGE_RATE}}%（行业标准·锁死）</td><td class="amt">−${{SHRINKAGE}}</td></tr>
+          <tr class="tot"><td>单件净利润</td><td class="amt">${{NET_PROFIT}}</td></tr>
+        </table>
+      </div>
+
+      <div class="card span2 warn">
+        <div class="k">⚠ 汇率风险预警</div>
+        <div class="body">
+          当前 USD→CNY <b>{{FX}}</b>；汇率每跌 0.1，净利润率约 <b>{{FX_SENS}} pp</b>。
+          进价占均价 <b>{{COST_PCT}}%</b>，对汇率敏感度高——若汇率持续走低，需调价或锁汇对冲。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="meta">
+    <span>外箱：<b>{{SIZE}}cm</b></span>
+    <span>PCS体积重：<b>{{PCS_VOL}}kg</b></span>
+    <span>端盒体积重：<b>{{CARTON_VOL}}kg</b></span>
+    <span>端盒PCS：<b>{{PCS_SET}}</b></span>
+    <span>IP：<b>{{IP}}</b></span>
+  </div>
+  <div class="foot">跨境核价决策官 · 净利润财务合规模型 · 阿里云百炼 bl + Qwen · 费率行业标准锁死，可在 config.json 调整</div>
+</div>
+</body>
+</html>
