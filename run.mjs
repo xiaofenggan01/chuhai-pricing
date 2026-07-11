@@ -29,6 +29,7 @@ function parseArgs(argv) {
       case "--plushie": case "--special": a.plushie = true; break;
       case "--ref-price": a.ref_price = Number(argv[++i]); break;
       case "--allow-estimate": a.allow_estimate = true; break;
+      case "--batch": a.batch = argv[++i]; break;
     }
   }
   return a;
@@ -154,6 +155,36 @@ async function searchWebFallback(info, prof) {
   prices.sort((a, b) => a - b);
   const median = prices[Math.floor(prices.length / 2)];
   return { retail_usd: median, source: `bl-search-web(${prices.length}条)`, range: [prices[0], prices[prices.length - 1]], note: j?.used };
+}
+
+// 【主链·核心痛点】bl search web 偏置到 profile 预选大平台（已验证 bl 可达）→ 聚合解析同款在售价
+async function searchPlatformPrices(info, prof) {
+  const kw = (`${info.name || ""} ${info.ip || ""}`.trim() || info.category || prof.vision_hint).split(/\s+/).slice(0, 4).join(" ");
+  const [lo, hi] = prof.price_sane_usd;
+  const platforms = prof.platforms || ["amazon", "ebay", "aliexpress", "temu"];
+  const pool = [];
+  for (const plat of platforms) {
+    console.log(`  → bl 搜 ${plat} …`);
+    const res = await runBl(["search", "web", "--query", `${kw} price ${plat} usd`, "--count", "8"]);
+    let pages = [];
+    try { pages = JSON.parse(res?.content?.[0]?.text || "{}").pages || []; } catch {}
+    // 仅保留 url/snippet 确实指向该平台的结果，保证来源可溯
+    const hit = pages.filter((p) => `${p.url || ""} ${p.snippet || ""}`.toLowerCase().includes(plat));
+    for (const p of hit) pool.push({ plat, title: p.title || "", snippet: (p.snippet || "").slice(0, 400), url: p.url || "" });
+    console.log(`    ${plat} 命中 ${hit.length} 条`);
+  }
+  if (!pool.length) return { retail_usd: null, source: "web-platforms-empty" };
+  const excerpt = pool.slice(0, 24).map((p, i) => `[${i + 1}][${p.plat}] ${p.title}\n${p.snippet}`).join("\n\n");
+  const msg = `商品：${kw}。以下是海外主流平台（${platforms.join("/")}）的在售结果摘要。请提取【同款真实在售】的单件零售价(USD)，必须排除：Preorder/预售、Sold out/缺货、Used/二手/refurbished、国内批发价(¥/1688/阿里)、拍卖/炒作价、无关款、以及明显偏离正常零售区间$${lo}-${hi}的炒价/整套/整端价。返回JSON：{"items":[{"platform":"","price":数字}],"prices":[数字...],"median":中位价或null,"platforms_hit":["平台..."],"used":"简述取舍理由"}。若全部不可信则{"prices":[],"median":null}。\n\n结果摘要:\n${excerpt}`;
+  const chat = await runBl(["text", "chat", "--message", msg]);
+  const j = extractJson(chatContent(chat));
+  const prices = (j?.prices || []).filter((p) => typeof p === "number" && p > 0 && p >= lo && p <= hi);
+  if (!prices.length) return { retail_usd: null, source: "web-platforms-no-valid-price", note: j?.used };
+  prices.sort((a, b) => a - b);
+  const median = j?.median && j.median >= lo && j.median <= hi ? j.median : prices[Math.floor(prices.length / 2)];
+  const hits = (j?.platforms_hit || [...new Set(pool.map((p) => p.plat))]).join(",");
+  console.log(`    ✓ 命中 ${prices.length} 条有效价（${hits}），中位 $${median}`);
+  return { retail_usd: median, source: `web-multi(${hits};${prices.length}条)`, range: [prices[0], prices[prices.length - 1]], items: j?.items, note: j?.used };
 }
 
 // ---------- 财务核算（净利润模型）----------
@@ -297,11 +328,47 @@ async function renderPoster(d) {
     .replace(/{{PCS_SET}}/g, String(d.pcs_set))
     .replace(/{{PRICE_SRC}}/g, d.priceSrc)
     .replace(/{{VALIDATION_BADGE}}/g, badge);
-  const outDir = path.join(ROOT, "out");
-  await mkdir(outDir, { recursive: true });
-  const outFile = path.join(outDir, "poster.html");
+  const outFile = d.outFile || path.join(ROOT, "out", "poster.html");
+  await mkdir(path.dirname(outFile), { recursive: true });
   await writeFile(outFile, out, "utf8");
   return outFile;
+}
+
+// ---------- CSV（零依赖）----------
+function parseCsv(text) {
+  const rows = [];
+  let field = "", row = [], inQ = false;
+  const pushF = () => { row.push(field); field = ""; };
+  const pushR = () => { if (row.length > 1 || row[0] !== "") rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') inQ = false;
+      else field += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ",") pushF();
+    else if (c === "\n") { pushF(); pushR(); }
+    else if (c === "\r") { /* skip */ }
+    else field += c;
+  }
+  if (field !== "" || row.length) { pushF(); pushR(); }
+  if (!rows.length) return [];
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  return rows.slice(1).map((r) => Object.fromEntries(header.map((h, i) => [h, (r[i] ?? "").trim()])));
+}
+
+// CSV 行 → args 契约
+function rowToArgs(rec) {
+  const num = (v) => (v === "" || v == null ? undefined : Number(v));
+  const truthy = (v) => /^(1|true|yes|y|是|毛绒)$/i.test(String(v || ""));
+  return {
+    name: rec.name || rec.名称 || "", ip: rec.ip || "", category: rec.category || rec.品类 || "",
+    cost: num(rec.cost ?? rec.成本), size: rec.size || rec.尺寸 || "",
+    size_type: rec.size_type || rec.口径 || "carton", pcs_set: num(rec.pcs_set ?? rec.件数),
+    case_count: num(rec.case_count), plushie: truthy(rec.special ?? rec.plushie ?? rec.毛绒),
+    ref_price: num(rec.ref_price ?? rec.参考价), allow_estimate: false,
+  };
 }
 
 function abort(failures) {
@@ -310,90 +377,146 @@ function abort(failures) {
   process.exit(2);
 }
 
+// 缺必填字段清单（单/批共用；批量据此 exit 3 向用户要数据）
+function missingFields(args) {
+  const m = [];
+  if (!args.image && !args.name) m.push("name(或image)");
+  if (args.cost == null || Number.isNaN(args.cost)) m.push("cost");
+  if (!args.size) m.push("size");
+  if (!args.pcs_set) m.push("pcs_set");
+  return m;
+}
+
+// ---------- 单 SKU 核价（可复用；返回结果对象，不 exit）----------
+async function priceOne(args, cfg, { outFile, silent = false } = {}) {
+  const log = silent ? () => {} : (...a) => console.log(...a);
+  const size_cm = String(args.size ?? "").split(/[x×X]/).map(Number);
+
+  let info;
+  if (args.name) {
+    info = { name: args.name, ip: args.ip || "", category: args.category || "", is_special: args.plushie };
+    log("① 商品 →", JSON.stringify(info));
+  } else {
+    log("① 识别商品…");
+    const dp = cfg.profiles[cfg.default_category];
+    info = await recognize(args.image, args.category ? cfg.profiles[args.category]?.vision_hint : dp?.vision_hint);
+    log("  →", JSON.stringify(info));
+  }
+
+  if (args.category && !matchProfile(cfg, args.category))
+    return { ok: false, name: info.name, failures: [{ code: "A9", msg: `品类档案不存在 (${args.category})`, fix: `用：${Object.keys(cfg.profiles).join(" / ")}` }] };
+  const category = matchProfile(cfg, args.category) || matchProfile(cfg, info.category) || cfg.default_category || Object.keys(cfg.profiles)[0];
+  const prof = cfg.profiles[category];
+  log(`  品类档案 → ${category}${args.category ? "" : "（自动匹配）"}`);
+
+  log("② 取海外公允价…");
+  let retail_usd, priceSrc, priceSource, priceTrusted;
+  if (args.ref_price) {
+    retail_usd = args.ref_price; priceSource = "user-ref-price"; priceTrusted = true;
+    priceSrc = "用户竞品参考价 $" + retail_usd; log("  →", priceSrc);
+  } else {
+    log("  → [痛点核心] bl 搜预选大平台在售有效价…");
+    const found = await searchPlatformPrices(info, prof);
+    if (found.retail_usd != null) {
+      retail_usd = found.retail_usd; priceSource = found.source; priceTrusted = true;
+      priceSrc = found.source + (found.range ? `（$${found.range[0]}~$${found.range[1]}）` : ""); log("  →", priceSrc);
+    } else {
+      log("  → 联网仍无有效价，回落模型估算…");
+      const est = await estimateRetail(info, prof);
+      retail_usd = est.retail_usd; priceSource = est.source; priceTrusted = false;
+      priceSrc = "model-fallback·" + est.source + (est.range ? `（$${est.range[0]}~$${est.range[1]}）` : ""); log("  →", priceSrc);
+    }
+  }
+
+  log("③ 财务核算…");
+  const special = args.plushie || !!info.is_special;
+  const fin = finance({ cost_cny: args.cost, size_cm, size_type: args.size_type, pcs_set: args.pcs_set, case_count: args.case_count, special, retail_usd, cfg, prof });
+  const lt = light(fin.netMarginPct, cfg);
+  log(`  → 公允价 $${retail_usd}  净利率 ${fin.netMarginPct}%  单件净利 $${fin.netProfit}  盈亏平衡 $${fin.breakevenPrice}  ${lt.label}`);
+
+  log("④ 财务校验（四组·硬拦截）…");
+  const vr = validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource, fin, allowEstimate: args.allow_estimate });
+  for (const w of vr.failures.filter((f) => f.warn)) log(`  ⚠️ [${w.code}] ${w.msg}`);
+  if (!vr.pass) return { ok: false, name: info.name, category, failures: vr.failures };
+  log("  ✅ 财务校验通过（A/B/C/D 全过）");
+
+  const poster = await renderPoster({ light: lt, name: info.name, ip: info.ip, category, specialLabel: special ? (prof.unit_coeff.special_label || "特殊") : "标准", cost_cny: args.cost, size_cm, size_type: args.size_type, pcs_set: args.pcs_set, retail_usd, fin, priceSrc, priceTrusted, validation: vr, cfg, outFile });
+  return { ok: true, name: info.name, ip: info.ip, category, retail_usd, priceSrc, priceTrusted, fin, light: lt, poster };
+}
+
+// ---------- 批量汇总页 ----------
+async function renderSummary(rows, outFile) {
+  const tr = rows.map((r) => {
+    const c = r.ok ? (r.light.key === "green" ? "#1aa260" : r.light.key === "red" ? "#d64545" : "#e0a800") : "#86909c";
+    return `<tr><td>${r.name}</td><td>${r.category || "—"}</td><td class="amt">${r.ok ? "$" + r.retail_usd : "—"}</td><td class="amt" style="color:${c};font-weight:700">${r.ok ? r.fin.netMarginPct + "%" : "—"}</td><td style="color:${c}">${r.ok ? r.light.label : "✗ " + (r.failures[0]?.code || "") + " " + (r.failures[0]?.msg || "")}</td><td>${r.ok ? `<a href="${path.basename(r.poster)}">海报</a>` : "—"}</td></tr>`;
+  }).join("\n");
+  const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>批量核价汇总</title><style>body{font-family:-apple-system,"PingFang SC",sans-serif;background:#f4f5f7;color:#1d2129;padding:28px}h1{font-size:20px}table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.06)}td,th{padding:12px 14px;text-align:left;border-bottom:1px solid #eef0f3;font-size:14px}th{color:#86909c;font-weight:500;background:#fafbfc}.amt{text-align:right;font-variant-numeric:tabular-nums}.foot{color:#a0a4ab;font-size:12px;margin-top:14px}</style></head><body><h1>跨境批量核价汇总 · ${rows.length} 款</h1><table><tr><th>商品</th><th>品类</th><th class="amt">公允价</th><th class="amt">净利率</th><th>结论</th><th>海报</th></tr>${tr}</table><div class="foot">固化流程 · bl 搜预选大平台 · 四组财务校验硬拦截</div></body></html>`;
+  await mkdir(path.dirname(outFile), { recursive: true });
+  await writeFile(outFile, html, "utf8");
+  return outFile;
+}
+
+const slug = (s, i) => (String(s || "sku").replace(/[^\w一-龥-]+/g, "_").slice(0, 30) || "sku") + "_" + i;
+
+// ---------- 批量入口 ----------
+async function runBatch(batchFile, cfg) {
+  const text = await readFile(path.resolve(batchFile), "utf8");
+  const recs = parseCsv(text);
+  if (!recs.length) { console.error("❌ CSV 无数据行"); process.exit(1); }
+  console.log(`读取 ${recs.length} 行，预检必填字段…`);
+
+  // 缺数据先问：任一行缺必填 → 汇总 exit 3
+  const rowsArgs = recs.map(rowToArgs);
+  const gaps = rowsArgs.map((a, i) => ({ line: i + 2, name: a.name || "(未命名)", miss: missingFields(a) })).filter((g) => g.miss.length);
+  if (gaps.length) {
+    console.error("\n⛔ 缺数据，已中止（请补齐后重跑）——需要向用户索要：");
+    for (const g of gaps) console.error(`  第 ${g.line} 行「${g.name}」缺：${g.miss.join("、")}`);
+    process.exit(3);
+  }
+
+  const outDir = path.join(ROOT, "out", "batch");
+  const results = [];
+  for (let i = 0; i < rowsArgs.length; i++) {
+    const a = rowsArgs[i];
+    a.allow_estimate = parseArgs(process.argv).allow_estimate; // 继承全局逃生阀
+    console.log(`\n——— [${i + 1}/${rowsArgs.length}] ${a.name} ———`);
+    try {
+      const r = await priceOne(a, cfg, { outFile: path.join(outDir, slug(a.name, i + 1) + ".html") });
+      results.push(r);
+      console.log(r.ok ? `  ✅ ${r.light.label} 净利率 ${r.fin.netMarginPct}%` : `  ✗ 校验未过：${r.failures.map((f) => f.code).join(",")}`);
+    } catch (e) { results.push({ ok: false, name: a.name, failures: [{ code: "ERR", msg: e.message }] }); console.log("  ✗ 异常：" + e.message); }
+  }
+
+  const summary = await renderSummary(results, path.join(outDir, "summary.html"));
+  const pass = results.filter((r) => r.ok).length;
+  console.log(`\n=== 批量完成：${pass}/${results.length} 通过 ===`);
+  console.log("汇总页 →", summary);
+  console.log(JSON.stringify(results.map((r) => ({ name: r.name, category: r.category, ok: r.ok, retail_usd: r.retail_usd, net_margin_pct: r.ok ? r.fin.netMarginPct : null, light: r.ok ? r.light.key : null, fail: r.ok ? null : r.failures.map((f) => f.code + ":" + f.msg) })), null, 2));
+  if (os.platform() === "darwin") exec(`open "${summary}"`);
+}
+
 // ---------- main ----------
 async function main() {
   const args = parseArgs(process.argv);
   const cfg = JSON.parse(await readFile(path.join(ROOT, "config.json"), "utf8"));
 
-  // 早期硬校验（组 A 的输入 gate，先拦明显错误）
-  const size_cm = String(args.size ?? "").split(/[x×X]/).map(Number);
-  const preF = [];
-  if (!args.image && !args.name) preF.push({ code: "A0", msg: "缺商品来源", fix: "传 --image <图> 或 --name <名>" });
-  if (args.cost == null) preF.push({ code: "A1", msg: "缺 --cost", fix: "传 --cost <采购成本¥>" });
-  if (!args.size) preF.push({ code: "A2", msg: "缺 --size", fix: "传 --size LxWxH" });
-  if (!args.pcs_set) preF.push({ code: "A3", msg: "缺 --pcs-set", fix: "传 --pcs-set <n>" });
-  if (preF.length) abort(preF);
+  if (args.batch) return runBatch(args.batch, cfg);
 
-  let info;
-  if (args.name) {
-    info = { name: args.name, ip: args.ip || "", category: args.category || "", is_special: args.plushie };
-    console.log("① 商品（用户提供名称）→", JSON.stringify(info));
-  } else {
-    console.log("① 识别商品…");
-    // 先用 default profile 的 hint 引导，识别后再重选 profile
-    const dp = cfg.profiles[cfg.default_category];
-    info = await recognize(args.image, args.category ? cfg.profiles[args.category]?.vision_hint : dp?.vision_hint);
-    console.log("  →", JSON.stringify(info));
-  }
+  // 单 SKU：早期缺字段硬拦截
+  const miss = missingFields(args);
+  if (miss.length) abort(miss.map((f) => ({ code: "A", msg: `缺 ${f}`, fix: `补 --${f.split("(")[0]}` })));
 
-  // 显式 --category 必须命中，静默回落默认档在严肃财务里危险（用户以为按A核价却套了B系数）
-  if (args.category && !matchProfile(cfg, args.category)) {
-    abort([{ code: "A9", msg: `品类档案不存在 (${args.category})`, fix: `用已有档案：${Object.keys(cfg.profiles).join(" / ")}` }]);
-  }
-  const category = matchProfile(cfg, args.category) || matchProfile(cfg, info.category) || cfg.default_category || Object.keys(cfg.profiles)[0];
-  const prof = cfg.profiles[category];
-  console.log(`  品类档案 → ${category}${args.category ? "" : "（自动匹配）"}`);
-  if (!prof) abort([{ code: "A9", msg: `无可用品类档案`, fix: `检查 config.profiles` }]);
-
-  console.log("② 取海外公允价…");
-  let retail_usd, priceSrc, priceSource, priceTrusted;
-  if (args.ref_price) {
-    retail_usd = args.ref_price; priceSource = "user-ref-price"; priceTrusted = true;
-    priceSrc = "用户提供的竞品参考价 $" + retail_usd;
-    console.log("  →", priceSrc);
-  } else {
-    console.log("  → [痛点核心] 联网搜竞品在售有效价…");
-    let found = await searchCompetitorPrices(info, prof);
-    if (found.retail_usd == null) { console.log("  → 竞品站无同款，bl search web 辅助…"); found = await searchWebFallback(info, prof); }
-    if (found.retail_usd != null) {
-      retail_usd = found.retail_usd; priceSource = found.source; priceTrusted = true;
-      priceSrc = found.source + (found.range ? `（$${found.range[0]}~$${found.range[1]}）` : "");
-      console.log("  →", priceSrc);
-    } else {
-      console.log("  → 联网仍无有效价，回落模型估算…");
-      const est = await estimateRetail(info, prof);
-      retail_usd = est.retail_usd; priceSource = est.source; priceTrusted = false;
-      priceSrc = "model-fallback·" + est.source + (est.range ? `（$${est.range[0]}~$${est.range[1]}）` : "");
-      console.log("  →", priceSrc);
-    }
-  }
-
-  console.log("③ 财务核算…");
-  const special = args.plushie || !!info.is_special;
-  const fin = finance({ cost_cny: args.cost, size_cm, size_type: args.size_type, pcs_set: args.pcs_set, case_count: args.case_count, special, retail_usd, cfg, prof });
-  const lt = light(fin.netMarginPct, cfg);
-  console.log(`  → 公允价 $${retail_usd}  净利润率 ${fin.netMarginPct}%  单件净利 $${fin.netProfit}  盈亏平衡价 $${fin.breakevenPrice}  ${lt.label}`);
-
-  console.log("④ 财务校验（四组·硬拦截）…");
-  const vr = validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource, fin, allowEstimate: args.allow_estimate });
-  for (const w of vr.failures.filter((f) => f.warn)) console.log(`  ⚠️ [${w.code}] ${w.msg}`);
-  if (!vr.pass) abort(vr.failures);
-  console.log("  ✅ 财务校验通过（A输入 / B公式 / C可信度 / D合理性 全过）");
-
-  console.log("⑤ 生成 Bento Box 海报…");
-  const poster = await renderPoster({ light: lt, name: info.name, ip: info.ip, category, specialLabel: special ? (prof.unit_coeff.special_label || "特殊") : "标准", cost_cny: args.cost, size_cm, size_type: args.size_type, pcs_set: args.pcs_set, retail_usd, fin, priceSrc, priceTrusted, validation: vr, cfg });
-  console.log("  →", poster);
-
+  const r = await priceOne(args, cfg);
+  if (!r.ok) abort(r.failures);
+  console.log("⑤ Bento Box 海报 →", r.poster);
   console.log("\n=== 核价结果 ===");
   console.log(JSON.stringify({
-    category, product: info,
-    input: { cost_cny: args.cost, size_cm, size_type: args.size_type, pcs_set: args.pcs_set, special, ref_price: args.ref_price },
-    price_source: priceSrc, price_trusted: priceTrusted, retail_usd,
-    finance: fin, light: lt.key, net_margin_pct: fin.netMarginPct,
-    validation: { pass: vr.pass, failures: vr.failures }, poster,
+    category: r.category, product: { name: r.name, ip: r.ip },
+    input: { cost_cny: args.cost, size_type: args.size_type, pcs_set: args.pcs_set, ref_price: args.ref_price },
+    price_source: r.priceSrc, price_trusted: r.priceTrusted, retail_usd: r.retail_usd,
+    finance: r.fin, light: r.light.key, net_margin_pct: r.fin.netMarginPct, poster: r.poster,
   }, null, 2));
-
-  if (os.platform() === "darwin") exec(`open "${poster}"`);
+  if (os.platform() === "darwin") exec(`open "${r.poster}"`);
 }
 
 main().catch((e) => { console.error("❌", e.message); process.exit(1); });

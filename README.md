@@ -27,10 +27,10 @@
   ① bl vision describe（Qwen-VL）→ 识别 商品名 / IP / 品类 / 特殊物流形态
   │  → 按 --category 或识别结果匹配【品类档案】（潮玩/3C…），装载该品类的竞品站/价格区间/物流系数
   │
-  ② 找海外公允价【核心痛点】（站点与合理区间来自品类档案）
-     · 遍历该品类竞品站 fetch 站内搜索页
-     · bl text chat 解析【同款在售价】——排除 预售 / 缺货 / Sold out / 超区间炒价
-     · 竞品站无同款 → bl search web 搜官网/Amazon（需开 MCP）
+  ② 找海外公允价【核心痛点】（预选大平台 + 合理区间来自品类档案）
+     · bl search web 偏置到预选大平台（Amazon/eBay/AliExpress/Temu，已实测 bl 可达）
+     · 按 url/snippet 过滤出各平台结果 → bl text chat 聚合解析【同款在售价】
+     · 排除 预售 / 缺货 / 二手 / 超区间炒价 / 整套价
      · 仍无 → 模型估算兜底（默认被 C 组拦截，除非 --allow-estimate）
   │
   ③ 单品利润决算（公式确定性，全在 config.json 可调）
@@ -94,6 +94,25 @@ node run.mjs --name "Labubu" --cost 69 \
 | `--special` | 特殊物流形态（如毛绒/蓬松），套该品类特殊系数；不传则用 vision 判断 |
 | `--ref-price` | 可选：竞品参考价 USD；不给则联网找公允价 |
 | `--allow-estimate` | 逃生阀：无可信价时放行「模型估算价」（仅演示，海报标注未验证） |
+| `--batch <file.csv>` | 批量：一张 CSV 核多款，产出逐单海报 + 汇总页 |
+
+### 批量核价（发一张表过来）
+
+```bash
+node run.mjs --batch skus.csv
+```
+
+CSV 首行表头（中英列名皆可），列契约：
+
+```
+name,ip,category,cost,size,size_type,pcs_set,ref_price
+Nanci,Finding Unicorn,潮玩盲盒,45,30x20x20,carton,12,19.99
+Wireless Earbuds,,3C数码配件,60,8x6x3,pcs,1,29.99
+```
+
+必填 = `name`、`cost`、`size`、`pcs_set`。**缺数据先问**：任一行缺必填 → 打印「第几行缺哪列」并 `exit 3`，**不核价**——补齐后重跑（绝不臆造）。产出：`out/batch/summary.html` 汇总表 + 每款一张 Bento Box 海报。
+
+> **固化流程 vs 传统临场搜索**：传统 AI Agent 每次现搜、结果飘忽、慢且不可复现；本 Skill 把「找价平台 / 公式 / 费率 / 四组校验」全定死，同一输入永远同一结果，可审计、可批量、可交接。
 
 ---
 
@@ -120,8 +139,9 @@ chuhai-pricing/
 
 | SKU | 结果 |
 |---|---|
-| Nanci（Finding Unicorn） | kikagoods 命中 5 条在售，中位 **$19.99** |
-| Labubu（图端到端） | 净利润率 **58.6%** · 单件净利 $20 · 🟢 绿灯 |
+| silicone phone case（3C·真取价） | bl 搜 Amazon/AliExpress 命中 3 条在售，中位 **$7.37** · 净利率 71.7% 🟢 |
+| Nanci（Finding Unicorn·潮玩） | 净利率 **50.6%** · 单件净利 $10.11 · 🟢 绿灯 |
+| Sony WH-1000XM5（超区间） | $348 超 3C 档 [3,120] → **D1 硬拦截**、不出海报 ✅ |
 
 ---
 

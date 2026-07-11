@@ -17,6 +17,7 @@
     "潮玩盲盒": {
       "aliases": ["潮玩", "盲盒", "手办", "blind box", "figure", "art toy", "popmart", "泡泡玛特"],
       "vision_hint": "潮玩/盲盒/手办",
+      "platforms": ["amazon", "ebay", "aliexpress", "temu"],
       "competitor_sites": ["kikagoods.com", "ttmart.com", "whoopea.com", "tesolife.com", "faire.com"],
       "price_sane_usd": [5, 60],
       "logistics": { "vol_divisor": 5000, "freight_rate_cny_per_kg": 70, "redundancy": 1.1, "min_ship_weight_kg": 2.5 },
@@ -25,6 +26,7 @@
     "3C数码配件": {
       "aliases": ["3c", "数码", "配件", "耳机", "充电", "earphone", "charger", "cable", "gadget", "accessory"],
       "vision_hint": "3C数码/电子配件",
+      "platforms": ["amazon", "ebay", "aliexpress", "temu"],
       "competitor_sites": ["amazon.com", "aliexpress.com", "temu.com", "walmart.com"],
       "price_sane_usd": [3, 120],
       "logistics": { "vol_divisor": 5000, "freight_rate_cny_per_kg": 65, "redundancy": 1.1, "min_ship_weight_kg": 2.5 },
