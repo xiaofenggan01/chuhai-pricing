@@ -175,7 +175,7 @@ async function searchPlatformPrices(info, prof) {
   }
   if (!pool.length) return { retail_usd: null, source: "web-platforms-empty" };
   const excerpt = pool.slice(0, 24).map((p, i) => `[${i + 1}][${p.plat}] ${p.title}\n${p.snippet}`).join("\n\n");
-  const msg = `商品：${kw}。以下是海外主流平台（${platforms.join("/")}）的在售结果摘要。请提取【同款真实在售】的单件零售价(USD)，必须排除：Preorder/预售、Sold out/缺货、Used/二手/refurbished、国内批发价(¥/1688/阿里)、拍卖/炒作价、无关款、以及明显偏离正常零售区间$${lo}-${hi}的炒价/整套/整端价。返回JSON：{"items":[{"platform":"","price":数字}],"prices":[数字...],"median":中位价或null,"platforms_hit":["平台..."],"used":"简述取舍理由"}。若全部不可信则{"prices":[],"median":null}。\n\n结果摘要:\n${excerpt}`;
+  const msg = `商品：${kw}。以下是海外主流平台（${platforms.join("/")}）的在售结果摘要。请提取【同款真实在售】的单件零售价(USD)，必须排除：Preorder/预售、Sold out/缺货、Used/二手/refurbished、国内批发价(¥/1688/阿里)、拍卖/炒作价、无关款、以及明显偏离正常零售区间$${lo}-${hi}的炒价/整套/整端价。返回JSON：{"items":[{"platform":"","name":"结果商品全名","price":数字}],"prices":[数字...],"median":中位价或null,"platforms_hit":["平台..."],"used":"简述取舍理由"}。若全部不可信则{"prices":[],"median":null}。\n\n结果摘要:\n${excerpt}`;
   const chat = await runBl(["text", "chat", "--message", msg]);
   const j = extractJson(chatContent(chat));
   const prices = (j?.prices || []).filter((p) => typeof p === "number" && p > 0 && p >= lo && p <= hi);
@@ -184,7 +184,26 @@ async function searchPlatformPrices(info, prof) {
   const median = j?.median && j.median >= lo && j.median <= hi ? j.median : prices[Math.floor(prices.length / 2)];
   const hits = (j?.platforms_hit || [...new Set(pool.map((p) => p.plat))]).join(",");
   console.log(`    ✓ 命中 ${prices.length} 条有效价（${hits}），中位 $${median}`);
-  return { retail_usd: median, source: `web-multi(${hits};${prices.length}条)`, range: [prices[0], prices[prices.length - 1]], items: j?.items, note: j?.used };
+  return { retail_usd: median, source: `web-multi(${hits};${prices.length}条)`, range: [prices[0], prices[prices.length - 1]], prices, items: j?.items || [], note: j?.used };
+}
+
+// 【巡检③】同款确认：取价结果的商品名 vs 输入商品名，是否同款（防「搜A给B」）
+async function confirmSameProduct(info, items) {
+  const names = (items || []).map((it) => it.name).filter(Boolean).slice(0, 8);
+  if (!names.length) return { same: true, reason: "无结果名可校验，跳过" };
+  const msg = `输入商品：${info.name || "?"}（IP：${info.ip || "未知"}，品类：${info.category || "未知"}）。以下是刚取到价格的结果商品全名：\n${names.map((n, i) => `${i + 1}. ${n}`).join("\n")}\n\n请判断这些结果与输入商品是否【同款/同IP同品类】（不是同名不同款、不是配件套装、不是替身款）。返回JSON：{"same":true/false,"reason":"简述"}。只要 majority 同款即 same=true。`;
+  const chat = await runBl(["text", "chat", "--message", msg]);
+  const j = extractJson(chatContent(chat));
+  return { same: j?.same === true, reason: j?.reason || "未给出理由" };
+}
+
+// 【巡检④】second opinion：对中位价独立再判一次合理性（防单次提取失误）
+async function secondOpinion(info, median, prof) {
+  const [lo, hi] = prof.price_sane_usd;
+  const msg = `商品：${info.name || "?"}（IP：${info.ip || "未知"}，品类：${info.category || "未知"}，该品类正常零售区间 $${lo}-$${hi}）。有人测算其海外零售中位价为 $${median}。请你独立判断这个价位对该商品是否合理（不高估、不低估、不是炒价也不是误提取）。返回JSON：{"fair":true/false,"reason":"简述，若不合理指出疑似原因（误提取/炒价/异款/单位错）"}。`;
+  const chat = await runBl(["text", "chat", "--message", msg]);
+  const j = extractJson(chatContent(chat));
+  return { fair: j?.fair === true, reason: j?.reason || "未给出理由" };
 }
 
 // ---------- 财务核算（净利润模型）----------
@@ -246,7 +265,7 @@ function light(netMarginPct, cfg) {
 }
 
 // ---------- 财务校验（四组·硬拦截）----------
-function validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource, fin, allowEstimate }) {
+function validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource, fin, allowEstimate, special, priceSamples, sameCheck, fairCheck }) {
   const F = []; // failures: {code, msg, fix}
   const near = (a, b, tol = 1e-6) => Math.abs(a - b) <= tol * Math.max(1, Math.abs(a), Math.abs(b));
 
@@ -273,6 +292,22 @@ function validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource,
     const recomputedNet = retail_usd - fin.totalCost;
     if (!near(fin.netProfit, Math.round(recomputedNet * 100) / 100, 0.02)) F.push({ code: "B3", msg: `净利润≠公允价−综合成本`, fix: "净利润不自洽" });
     if (!(fin.pcsVolKg >= 0 && fin.cartonVolKg >= 0 && fin.shipBaseVolKg >= 0)) F.push({ code: "B4", msg: "体积重出现负值", fix: "检查尺寸/系数" });
+    // B5 物流费独立复算（从原始尺寸/系数重推，堵 finance 分支 bug）
+    const r2 = (n) => Math.round(n * 100) / 100;
+    const [Lr, Wr, Hr] = size_cm;
+    const lg = prof.logistics;
+    const coeffR = special ? prof.unit_coeff.special : prof.unit_coeff.normal;
+    let volKgR = (Lr * Wr * Hr) / lg.vol_divisor;
+    if (args.size_type === "carton") volKgR /= args.pcs_set;
+    else if (args.size_type === "case") volKgR /= (args.case_count || args.pcs_set);
+    const cartonKgR = volKgR * coeffR * lg.redundancy * args.pcs_set;
+    let baseR;
+    if (args.size_type === "pcs") baseR = volKgR * coeffR * lg.redundancy;
+    else if (cartonKgR >= lg.min_ship_weight_kg) baseR = volKgR * coeffR * lg.redundancy;
+    else baseR = lg.min_ship_weight_kg / args.pcs_set;
+    const logisticsUsdR = (baseR * lg.freight_rate_cny_per_kg) / cfg.fx_usd_to_cny;
+    if (!near(fin.logisticsUsd, r2(logisticsUsdR), 0.02)) F.push({ code: "B5", msg: `物流费未通过独立复算 ${fin.logisticsUsd}≠${r2(logisticsUsdR)}`, fix: "引擎物流分支 bug，勿用产物" });
+    if (!near(fin.pcsVolKg, r2(volKgR), 0.005)) F.push({ code: "B5", msg: `PCS体积重未通过独立复算 ${fin.pcsVolKg}≠${r2(volKgR)}`, fix: "引擎 bug" });
 
     // C. 数据可信度（严肃财务核心）
     const trusted = /^web-/.test(priceSource) || priceSource === "user-ref-price";
@@ -280,6 +315,20 @@ function validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource,
       if (allowEstimate) F.push({ code: "C1-warn", msg: "价格仅模型估算（已用 --allow-estimate 放行）", fix: "演示可，正式核价请补 --ref-price 或可信竞品价", warn: true });
       else F.push({ code: "C1", msg: `价格未经可信来源验证 (${priceSource})`, fix: "补 --ref-price <真实竞品价>；或加 --allow-estimate 仅演示放行" });
     }
+    // C2 样本数门限：web 价需 ≥2 条相互印证（--ref-price 为单值可信，跳过）
+    if (/^web-/.test(priceSource) && priceSamples && priceSamples.length < 2)
+      F.push({ code: "C2", msg: `web 取价仅 ${priceSamples.length} 条，缺乏交叉印证`, fix: "补 --ref-price 用人工可信价确认" });
+    // C3 价格离散度：变异系数 cv>0.4 判高度离散（疑似混入炒价/异款）
+    if (/^web-/.test(priceSource) && priceSamples && priceSamples.length >= 2) {
+      const mean = priceSamples.reduce((a, b) => a + b, 0) / priceSamples.length;
+      const std = Math.sqrt(priceSamples.reduce((s, p) => s + (p - mean) ** 2, 0) / priceSamples.length);
+      const cv = mean > 0 ? std / mean : 0;
+      if (cv > 0.4) F.push({ code: "C3", msg: `价格离散度过高（cv=${cv.toFixed(2)}，样本 ${priceSamples.join(",")}）`, fix: "疑似混入炒价/异款，补 --ref-price 人工确认" });
+    }
+    // C4 同款确认（防「搜 A 给 B」）
+    if (sameCheck && !sameCheck.same) F.push({ code: "C4", msg: `取价结果疑似异款：${sameCheck.reason}`, fix: "换更准的商品名/IP，或补 --ref-price" });
+    // C5 second opinion（防单次提取失误）
+    if (fairCheck && !fairCheck.fair) F.push({ code: "C5", msg: `价格二次校验不通过：${fairCheck.reason}`, fix: "疑似误提取/炒价，补 --ref-price 人工确认" });
 
     // D. 结果合理性
     const [lo, hi] = prof.price_sane_usd;
@@ -411,6 +460,7 @@ async function priceOne(args, cfg, { outFile, silent = false } = {}) {
 
   log("② 取海外公允价…");
   let retail_usd, priceSrc, priceSource, priceTrusted;
+  let priceSamples = [], sameCheck = null, fairCheck = null;
   if (args.ref_price) {
     retail_usd = args.ref_price; priceSource = "user-ref-price"; priceTrusted = true;
     priceSrc = "用户竞品参考价 $" + retail_usd; log("  →", priceSrc);
@@ -418,8 +468,14 @@ async function priceOne(args, cfg, { outFile, silent = false } = {}) {
     log("  → [痛点核心] bl 搜预选大平台在售有效价…");
     const found = await searchPlatformPrices(info, prof);
     if (found.retail_usd != null) {
-      retail_usd = found.retail_usd; priceSource = found.source; priceTrusted = true;
+      retail_usd = found.retail_usd; priceSource = found.source; priceTrusted = true; priceSamples = found.prices || [];
       priceSrc = found.source + (found.range ? `（$${found.range[0]}~$${found.range[1]}）` : ""); log("  →", priceSrc);
+      log("  → [巡检③] 同款确认…");
+      sameCheck = await confirmSameProduct(info, found.items);
+      log(`    ${sameCheck.same ? "✓ 同款" : "✗ 疑似异款"}：${sameCheck.reason}`);
+      log("  → [巡检④] 价格二次校验…");
+      fairCheck = await secondOpinion(info, retail_usd, prof);
+      log(`    ${fairCheck.fair ? "✓ 合理" : "✗ 疑似失真"}：${fairCheck.reason}`);
     } else {
       log("  → 联网仍无有效价，回落模型估算…");
       const est = await estimateRetail(info, prof);
@@ -435,7 +491,7 @@ async function priceOne(args, cfg, { outFile, silent = false } = {}) {
   log(`  → 公允价 $${retail_usd}  净利率 ${fin.netMarginPct}%  单件净利 $${fin.netProfit}  盈亏平衡 $${fin.breakevenPrice}  ${lt.label}`);
 
   log("④ 财务校验（四组·硬拦截）…");
-  const vr = validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource, fin, allowEstimate: args.allow_estimate });
+  const vr = validate({ args, cfg, prof, category, size_cm, retail_usd, priceSource, fin, allowEstimate: args.allow_estimate, special, priceSamples, sameCheck, fairCheck });
   for (const w of vr.failures.filter((f) => f.warn)) log(`  ⚠️ [${w.code}] ${w.msg}`);
   if (!vr.pass) return { ok: false, name: info.name, category, failures: vr.failures };
   log("  ✅ 财务校验通过（A/B/C/D 全过）");
