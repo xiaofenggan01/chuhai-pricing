@@ -30,6 +30,7 @@ function parseArgs(argv) {
       case "--ref-price": a.ref_price = Number(argv[++i]); break;
       case "--allow-estimate": a.allow_estimate = true; break;
       case "--batch": a.batch = argv[++i]; break;
+      case "--reverse": a.reverse = true; break;
     }
   }
   return a;
@@ -175,16 +176,28 @@ async function searchPlatformPrices(info, prof) {
   }
   if (!pool.length) return { retail_usd: null, source: "web-platforms-empty" };
   const excerpt = pool.slice(0, 24).map((p, i) => `[${i + 1}][${p.plat}] ${p.title}\n${p.snippet}`).join("\n\n");
-  const msg = `商品：${kw}。以下是海外主流平台（${platforms.join("/")}）的在售结果摘要。请提取【同款真实在售】的单件零售价(USD)，必须排除：Preorder/预售、Sold out/缺货、Used/二手/refurbished、国内批发价(¥/1688/阿里)、拍卖/炒作价、无关款、以及明显偏离正常零售区间$${lo}-${hi}的炒价/整套/整端价。返回JSON：{"items":[{"platform":"","name":"结果商品全名","price":数字}],"prices":[数字...],"median":中位价或null,"platforms_hit":["平台..."],"used":"简述取舍理由"}。若全部不可信则{"prices":[],"median":null}。\n\n结果摘要:\n${excerpt}`;
+  const msg = `商品：${kw}（要的是【单件/PC】零售价，USD）。以下是海外主流平台（${platforms.join("/")}）的在售结果摘要。请提取与输入【同 IP 或同角色/同系列】的在售价，并统一换算成单件 USD（若结果是一整盒/端盒/整套，按件数除一下，例如盲盒端盒 12 件就 ÷12、figure 套装按标注件数 ÷）。只排除：Preorder/预售、Sold out/缺货、Used/二手/refurbished、国内¥价/1688/阿里、完全不同 IP 的无关款。同 IP 的不同款式/变体都要算进来（不要因款式/配色不同就排除）。返回JSON：{"items":[{"platform":"","name":"","price":单件USD,"set_pcs":数字或null}],"prices":[单件USD...],"median":单件中位或null,"platforms_hit":["平台..."],"used":"简述取舍"}。若确实无任何同 IP 在售价则{"prices":[],"median":null}。\n\n结果摘要:\n${excerpt}`;
   const chat = await runBl(["text", "chat", "--message", msg]);
   const j = extractJson(chatContent(chat));
-  const prices = (j?.prices || []).filter((p) => typeof p === "number" && p > 0 && p >= lo && p <= hi);
-  if (!prices.length) return { retail_usd: null, source: "web-platforms-no-valid-price", note: j?.used };
-  prices.sort((a, b) => a - b);
-  const median = j?.median && j.median >= lo && j.median <= hi ? j.median : prices[Math.floor(prices.length / 2)];
+  // 兼容：prices 为空时从 items 派生；set_pcs 自归一化为单件
+  let prices = (j?.prices || []).filter((p) => typeof p === "number" && p > 0);
+  if (!prices.length && Array.isArray(j?.items)) {
+    for (const it of j.items) {
+      let p = typeof it.price === "number" ? it.price : NaN;
+      if (!(p > 0)) continue;
+      if (it.set_pcs && it.set_pcs > 1) p = p / it.set_pcs; // 整套 → 单件
+      prices.push(Math.round(p * 100) / 100);
+    }
+  }
+  // 放宽硬过滤：只挡明显单位错误（>区间上限 3 倍），其余留给 C3 离散度校验处理
+  const wide = prices.filter((p) => p > 0 && p <= hi * 3);
+  console.log(`    [解析] 原始 ${prices.length} 条 → 过滤后 ${wide.length} 条${j?.used ? "（" + String(j.used).slice(0, 70) + "）" : ""}`);
+  if (!wide.length) return { retail_usd: null, source: "web-platforms-no-valid-price", note: j?.used };
+  wide.sort((a, b) => a - b);
+  const median = (j?.median && j.median > 0 && j.median <= hi * 3) ? j.median : wide[Math.floor(wide.length / 2)];
   const hits = (j?.platforms_hit || [...new Set(pool.map((p) => p.plat))]).join(",");
-  console.log(`    ✓ 命中 ${prices.length} 条有效价（${hits}），中位 $${median}`);
-  return { retail_usd: median, source: `web-multi(${hits};${prices.length}条)`, range: [prices[0], prices[prices.length - 1]], prices, items: j?.items || [], note: j?.used };
+  console.log(`    ✓ 命中 ${wide.length} 条有效价（${hits}），中位 $${median}`);
+  return { retail_usd: median, source: `web-multi(${hits};${wide.length}条)`, range: [wide[0], wide[wide.length - 1]], prices: wide, items: j?.items || [], note: j?.used };
 }
 
 // 【巡检③】同款确认：取价结果的商品名 vs 输入商品名，是否同款（防「搜A给B」）
@@ -500,6 +513,42 @@ async function priceOne(args, cfg, { outFile, silent = false } = {}) {
   return { ok: true, name: info.name, ip: info.ip, category, retail_usd, priceSrc, priceTrusted, fin, light: lt, poster };
 }
 
+// ---------- 反推：已知零售价 → 各档净利率下的最高可接受进价 ----------
+// 净利率 m 时进价 C = fx × (R×(1−m−pr−sr) − 物流USD)。物流与成本无关，用 finance(¥1) 取。
+function reverseFinance({ retail_usd, size_cm, size_type, pcs_set, case_count, special, cfg, prof }) {
+  const dummy = finance({ cost_cny: 1, size_cm, size_type, pcs_set, case_count, special, retail_usd, cfg, prof });
+  const L = dummy.logisticsUsd, fx = cfg.fx_usd_to_cny;
+  const pr = cfg.fees.payment_rate, sr = cfg.fees.shrinkage_rate;
+  const gm = cfg.thresholds.green_net_margin, rm = cfg.thresholds.red_net_margin;
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const cBe = fx * (retail_usd * (1 - pr - sr) - L);
+  const cGreen = fx * (retail_usd * (1 - gm - pr - sr) - L);
+  const cRed = fx * (retail_usd * (1 - rm - pr - sr) - L);
+  return { retail_usd, logisticsUsd: r2(L), cBe: r2(cBe), cGreen: r2(cGreen), cRed: r2(cRed), pcsVolKg: dummy.pcsVolKg, cartonVolKg: dummy.cartonVolKg };
+}
+
+function missingFieldsReverse(args) {
+  const m = [];
+  if (!args.name) m.push("name");
+  if (args.ref_price == null || Number.isNaN(args.ref_price)) m.push("ref_price");
+  if (!args.size) m.push("size");
+  if (!args.pcs_set) m.push("pcs_set");
+  return m;
+}
+
+async function reverseOne(args, cfg) {
+  const size_cm = String(args.size).split(/[x×X]/).map(Number);
+  if (args.category && !matchProfile(cfg, args.category))
+    return { ok: false, name: args.name, failures: [{ code: "A9", msg: `品类档案不存在 (${args.category})`, fix: `用：${Object.keys(cfg.profiles).join(" / ")}` }] };
+  const category = matchProfile(cfg, args.category) || cfg.default_category || Object.keys(cfg.profiles)[0];
+  const prof = cfg.profiles[category];
+  const r = reverseFinance({ retail_usd: args.ref_price, size_cm, size_type: args.size_type, pcs_set: args.pcs_set, case_count: args.case_count, special: args.plushie, cfg, prof });
+  const fx = cfg.fx_usd_to_cny;
+  const retailCny = r.retail_usd * fx;
+  const verdict = r.cBe <= 0 ? "无论进价多少都亏（运费已超毛利）" : (r.cGreen > 0 ? `进价 ≤ ¥${r.cGreen} 可达绿灯(≥20%)` : `即便零进价也难达标（运费占比过高）`);
+  return { ok: true, name: args.name, category, ...r, retailCny: Math.round(retailCny * 100) / 100, verdict };
+}
+
 // ---------- 批量汇总页 ----------
 async function renderSummary(rows, outFile) {
   const tr = rows.map((r) => {
@@ -516,18 +565,39 @@ const slug = (s, i) => (String(s || "sku").replace(/[^\w一-龥-]+/g, "_").slice
 
 // ---------- 批量入口 ----------
 async function runBatch(batchFile, cfg) {
+  const rev = parseArgs(process.argv).reverse; // 反推模式：已知 ref_price → 反推最高进价
   const text = await readFile(path.resolve(batchFile), "utf8");
   const recs = parseCsv(text);
   if (!recs.length) { console.error("❌ CSV 无数据行"); process.exit(1); }
-  console.log(`读取 ${recs.length} 行，预检必填字段…`);
+  console.log(`读取 ${recs.length} 行，预检必填字段…${rev ? "（反推模式：要 ref_price/size/pcs_set，不要 cost）" : ""}`);
 
-  // 缺数据先问：任一行缺必填 → 汇总 exit 3
   const rowsArgs = recs.map(rowToArgs);
-  const gaps = rowsArgs.map((a, i) => ({ line: i + 2, name: a.name || "(未命名)", miss: missingFields(a) })).filter((g) => g.miss.length);
+  const gaps = rowsArgs.map((a, i) => ({ line: i + 2, name: a.name || "(未命名)", miss: (rev ? missingFieldsReverse : missingFields)(a) })).filter((g) => g.miss.length);
   if (gaps.length) {
-    console.error("\n⛔ 缺数据，已中止（请补齐后重跑）——需要向用户索要：");
+    console.error("\n⛔ 缺数据，已中止（请补齐后重跑）：");
     for (const g of gaps) console.error(`  第 ${g.line} 行「${g.name}」缺：${g.miss.join("、")}`);
     process.exit(3);
+  }
+
+  // 反推模式：算每行的进价天花板 + 反推汇总
+  if (rev) {
+    const outDir = path.join(ROOT, "out", "batch");
+    const rows = [];
+    for (let i = 0; i < rowsArgs.length; i++) {
+      const a = rowsArgs[i];
+      console.log(`\n——— [${i + 1}/${rowsArgs.length}] ${a.name}（反推）———`);
+      const r = await reverseOne(a, cfg);
+      rows.push(r);
+      if (r.ok) console.log(`  零售 $${r.retail_usd}(¥${r.retailCny}) 物流$${r.logisticsUsd} → 绿线最高进价 ¥${r.cGreen} | 红线 ¥${r.cRed} | 盈亏平衡 ¥${r.cBe}\n  ${r.verdict}`);
+      else console.log("  ✗", r.failures[0]?.msg);
+    }
+    const tr = rows.map((r) => r.ok ? `<tr><td>${r.name}</td><td>${r.category}</td><td class="amt">$${r.retail_usd}</td><td class="amt">¥${r.retailCny}</td><td class="amt">¥${r.cGreen}</td><td class="amt">¥${r.cRed}</td><td class="amt">¥${r.cBe}</td><td>${r.verdict}</td></tr>` : `<tr><td>${r.name}</td><td colspan="7">✗ ${r.failures[0]?.msg||""}</td></tr>`).join("\n");
+    const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>反推测试汇总</title><style>body{font-family:-apple-system,"PingFang SC",sans-serif;background:#f4f5f7;color:#1d2129;padding:28px}h1{font-size:20px}table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.06)}td,th{padding:11px 12px;text-align:left;border-bottom:1px solid #eef0f3;font-size:13px}th{color:#86909c;font-weight:500;background:#fafbfc}.amt{text-align:right;font-variant-numeric:tabular-nums}.foot{color:#a0a4ab;font-size:12px;margin-top:14px}</style></head><body><h1>反推测试 · 已知零售价 → 最高可接受进价（${rows.length} 款）</h1><table><tr><th>商品</th><th>品类</th><th class="amt">零售(USD)</th><th class="amt">零售(¥)</th><th class="amt">绿线最高进价(≤20%)</th><th class="amt">红线进价(≤10%)</th><th class="amt">盈亏平衡</th><th>结论</th></tr>${tr}</table><div class="foot">反推：进价 ≤ 绿线值 → 净利率 ≥20% 绿灯；绿线 < 进价 < 红线 → 黄；> 红线 → 红。盈亏平衡 = 净利率 0%。</div></body></html>`;
+    const sum = path.join(outDir, "reverse_summary.html");
+    await mkdir(outDir, { recursive: true }); await writeFile(sum, html, "utf8");
+    console.log(`\n=== 反推汇总 → ${sum} ===`);
+    if (os.platform() === "darwin") exec(`open "${sum}"`);
+    return;
   }
 
   const outDir = path.join(ROOT, "out", "batch");
@@ -557,6 +627,22 @@ async function main() {
   const cfg = JSON.parse(await readFile(path.join(ROOT, "config.json"), "utf8"));
 
   if (args.batch) return runBatch(args.batch, cfg);
+
+  // 反推模式：已知 ref_price（零售）→ 反推各档净利率下的最高进价
+  if (args.reverse) {
+    const miss = missingFieldsReverse(args);
+    if (miss.length) abort(miss.map((f) => ({ code: "A", msg: `缺 ${f}`, fix: `反推需 --${f}` })));
+    const r = await reverseOne(args, cfg);
+    if (!r.ok) abort(r.failures);
+    console.log("\n=== 反推结果 ===");
+    console.log(JSON.stringify(r, null, 2));
+    console.log(`\n零售 $${r.retail_usd}（¥${r.retailCny}） | 物流 $${r.logisticsUsd}`);
+    console.log(`绿线最高进价(净利率≥20%)：¥${r.cGreen}`);
+    console.log(`红线进价(净利率=10%)：¥${r.cRed}`);
+    console.log(`盈亏平衡进价(净利率=0%)：¥${r.cBe}`);
+    console.log(`结论：${r.verdict}`);
+    return;
+  }
 
   // 单 SKU：早期缺字段硬拦截
   const miss = missingFields(args);

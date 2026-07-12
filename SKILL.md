@@ -20,6 +20,10 @@ node run.mjs --image <商品图> 或 --name <名称> \
 
 # 批量：一张 CSV 核多款
 node run.mjs --batch <file.csv> [--allow-estimate]
+
+# 反推：已知零售价 → 算各档净利率下的最高可接受进价（采购谈判底牌）
+node run.mjs --reverse --name <名> --ref-price <USD> --size <LxWxH> --size-type <pcs|carton|case> --pcs-set <n> [--category <品类>]
+node run.mjs --batch <file.csv> --reverse   # 批量反推（CSV 不要 cost，要 ref_price）
 ```
 
 例（图输入）：`node run.mjs --image samples/labubu.jpeg --cost 69 --size 12x10x8 --size-type pcs --pcs-set 1`
